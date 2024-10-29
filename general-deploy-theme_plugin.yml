@@ -1,0 +1,45 @@
+name: WordPress Deploy
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v2
+
+    - name: Deploy WordPress Theme
+      env:
+        THEME_DIR: your-theme-directory
+        VPS_HOST: your-vps-host
+        VPS_USER: your-vps-user
+        VPS_PRIVATE_KEY: ${{ secrets.VPS_PRIVATE_KEY }}
+      run: |
+        # Add the private key to the ssh-agent
+        mkdir -p ~/.ssh
+        echo "$VPS_PRIVATE_KEY" > ~/.ssh/id_rsa
+        chmod 600 ~/.ssh/id_rsa
+        ssh-add ~/.ssh/id_rsa
+
+        # Deploy WordPress theme
+        scp -r $THEME_DIR/* $VPS_USER@$VPS_HOST:/path/to/wordpress/wp-content/themes/$THEME_DIR
+
+    - name: Deploy WordPress Plugin
+      env:
+        PLUGIN_DIR: your-plugin-directory
+        VPS_HOST: your-vps-host
+        VPS_USER: your-vps-user
+        VPS_PRIVATE_KEY: ${{ secrets.VPS_PRIVATE_KEY }}
+      run: |
+        # Add the private key to the ssh-agent
+        mkdir -p ~/.ssh
+        echo "$VPS_PRIVATE_KEY" > ~/.ssh/id_rsa
+        chmod 600 ~/.ssh/id_rsa
+        ssh-add ~/.ssh/id_rsa
+
+        # Deploy WordPress plugin
+        scp -r $PLUGIN_DIR/* $VPS_USER@$VPS_HOST:/path/to/wordpress/wp-content/plugins/$PLUGIN_DIR
