@@ -1,0 +1,37 @@
+services:
+  wordpress:
+    image: wordpress
+    restart: always
+    environment:
+      WORDPRESS_DB_HOST: db
+      WORDPRESS_DB_USER: adminDev
+      WORDPRESS_DB_PASSWORD: kmzwa8awaa
+      WORDPRESS_DB_NAME: wordpressdb
+    volumes:
+      - wordpress:/var/www/html
+    networks:
+      - wordpress_network
+      - nginx-proxy-manager_npm_network  # Updated to match your actual NPM network
+
+  db:
+    image: mysql:8.0
+    restart: always
+    environment:
+      MYSQL_DATABASE: wordpressdb
+      MYSQL_USER: adminDev
+      MYSQL_PASSWORD: kmzwa8awaa
+      MYSQL_RANDOM_ROOT_PASSWORD: '1'
+    volumes:
+      - db:/var/lib/mysql
+    networks:
+      - wordpress_network
+
+volumes:
+  wordpress:
+  db:
+
+networks:
+  wordpress_network:
+    driver: bridge
+  nginx-proxy-manager_npm_network:  # Updated to match your actual NPM network
+    external: true
