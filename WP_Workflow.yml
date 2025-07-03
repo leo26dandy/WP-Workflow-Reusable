@@ -1,0 +1,32 @@
+name: Deploy Hurkmans Theme to Hostinger
+
+on:
+  push:
+    branches:
+      - dev-stable
+
+jobs:
+  deploy-theme:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up SSH key
+        uses: webfactory/ssh-agent@v0.8.0
+        with:
+          ssh-private-key: ${{ secrets.SERVER_SSH_KEY }}
+
+      - name: Debug List remote theme directory
+        run: |
+          ssh -o StrictHostKeyChecking=no -p ${{ secrets.SERVER_SSH_PORT || 22 }} \
+            ${{ secrets.SERVER_SSH_USER }}@${{ secrets.SERVER_SSH_HOST }} \
+            "ls -lah FILE_PATH_SSH || echo 'Directory does not exist'"
+
+      - name: Deploy hurkmans theme via rsync (verbose)
+        run: |
+          rsync -avvz --delete \
+            -e "ssh -o StrictHostKeyChecking=no -p ${{ secrets.SERVER_SSH_PORT || 22 }}" \
+            ./wp-content/themes/THEME_NAME/ \
+            ${{ secrets.SERVER_SSH_USER }}@${{ secrets.SERVER_SSH_HOST }}:FILE_PATH_SSH
