@@ -1,13 +1,17 @@
-name: Deploy WP Theme to Hostinger
+name: Deploy Hurkmans Theme to Hostinger
 
 on:
   push:
     branches:
+      - main
       - dev-stable
 
 jobs:
   deploy-theme:
     runs-on: ubuntu-latest
+    env:
+      # Set the destination path depending on the branch
+      DEPLOY_PATH: ${{ github.ref_name == 'main' && '/home/your_user/domains/yourdomain.com/public_html/wp-content/themes/your-theme' || '/home/your_user/domains/staging.yourdomain.com/public_html/wp-content/themes/your-theme' }}
 
     steps:
       - name: Checkout code
@@ -16,17 +20,17 @@ jobs:
       - name: Set up SSH key
         uses: webfactory/ssh-agent@v0.8.0
         with:
-          ssh-private-key: ${{ secrets.SERVER_SSH_KEY }}
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
 
       - name: Debug List remote theme directory
         run: |
-          ssh -o StrictHostKeyChecking=no -p ${{ secrets.SERVER_SSH_PORT || 22 }} \
-            ${{ secrets.SERVER_SSH_USER }}@${{ secrets.SERVER_SSH_HOST }} \
-            "ls -lah FILE_PATH_SSH || echo 'Directory does not exist'"
+          ssh -o StrictHostKeyChecking=no -p ${{ secrets.SSH_PORT || 22 }} \
+            ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} \
+            "ls -lah $(dirname $DEPLOY_PATH) || echo 'Directory does not exist'"
 
-      - name: Deploy WP theme via rsync (verbose)
+      - name: Deploy theme via rsync (verbose)
         run: |
           rsync -avvz --delete \
-            -e "ssh -o StrictHostKeyChecking=no -p ${{ secrets.SERVER_SSH_PORT || 22 }}" \
-            ./wp-content/themes/THEME_NAME/ \
-            ${{ secrets.SERVER_SSH_USER }}@${{ secrets.SERVER_SSH_HOST }}:FILE_PATH_SSH
+            -e "ssh -o StrictHostKeyChecking=no -p ${{ secrets.SSH_PORT || 22 }}" \
+            ./wp-content/themes/your-theme/ \
+            ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:$DEPLOY_PATH/
