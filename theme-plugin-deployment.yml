@@ -1,0 +1,432 @@
+name: Deploy The Inserve Theme & Plugin to Development
+
+on:
+  push:
+    branches:
+      - dev-stable  # Development deployment
+  workflow_dispatch:  # Allow manual triggers
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        default: 'development'
+        type: choice
+        options:
+          - development
+      force_deploy:
+        description: 'Force deployment (skip safety checks)'
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: ${{ github.ref_name == 'dev-stable' && 'development' }}
+    
+    env:
+      # Directory settings
+      THEME_SUBDIR: wp-content/themes/starter-theme-custom
+      PLUGIN_SUBDIR: wp-content/plugins/plugin-name
+      BACKUP_DIR: /tmp/wordpress-backup
+      MAX_RETRIES: 3
+      RSYNC_TIMEOUT: 300
+      
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1  # Shallow clone for faster checkout
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: './wp-content/plugins/plugin-name/lib/views/package-lock.json'
+
+      - name: Setup PHP and Composer
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          tools: composer:v2
+
+      - name: Determine deployment environment
+        id: env-setup
+        run: |
+          if [[ "${{ github.ref_name }}" == "dev-stable" ]] || [[ "${{ inputs.environment }}" == "development" ]]; then
+            echo "ENVIRONMENT=development" >> $GITHUB_OUTPUT
+            echo "SSH_HOST=${{ secrets.HOSTINGER_SSH_HOST }}" >> $GITHUB_OUTPUT
+            echo "SSH_USER=${{ secrets.HOSTINGER_SSH_USER }}" >> $GITHUB_OUTPUT
+            echo "SSH_PORT=${{ secrets.HOSTINGER_SSH_PORT || '22' }}" >> $GITHUB_OUTPUT
+            echo "DEPLOY_PATH=${{ secrets.HOSTINGER_PATH }}" >> $GITHUB_OUTPUT
+            echo "SITE_URL=https://dashboard-classict.admin-developer.com" >> $GITHUB_OUTPUT
+            echo "FILE_OWNER=${{ secrets.HOSTINGER_OWNER || 'team_3:team_3' }}" >> $GITHUB_OUTPUT
+            echo "SSH_KEY_SECRET=HOSTINGER_SSH_KEY" >> $GITHUB_OUTPUT
+            THEME_DEPLOY_PATH="${{ secrets.HOSTINGER_PATH }}/${THEME_SUBDIR}"
+            PLUGIN_DEPLOY_PATH="${{ secrets.HOSTINGER_PATH }}/${PLUGIN_SUBDIR}"
+          fi
+          
+          echo "THEME_DEPLOY_PATH=${THEME_DEPLOY_PATH}" >> $GITHUB_OUTPUT
+          echo "PLUGIN_DEPLOY_PATH=${PLUGIN_DEPLOY_PATH}" >> $GITHUB_OUTPUT
+
+      - name: Validate deployment prerequisites
+        run: |
+          echo "Validating deployment configuration..."
+          
+          # Validate theme directory exists in repository
+          if [[ ! -d "./${THEME_SUBDIR}" ]]; then
+            echo "Theme directory not found in repository: ./${THEME_SUBDIR}"
+            exit 1
+          fi
+          
+          # Validate plugin directory exists in repository
+          if [[ ! -d "./${PLUGIN_SUBDIR}" ]]; then
+            echo "Plugin directory not found in repository: ./${PLUGIN_SUBDIR}"
+            exit 1
+          fi
+          
+          # Check plugin structure
+          if [[ ! -d "./${PLUGIN_SUBDIR}/lib" ]]; then
+            echo "Plugin lib directory not found: ./${PLUGIN_SUBDIR}/lib"
+            exit 1
+          fi
+          
+          if [[ ! -f "./${PLUGIN_SUBDIR}/lib/composer.json" ]]; then
+            echo "composer.json not found in plugin lib directory"
+            exit 1
+          fi
+          
+          if [[ ! -f "./${PLUGIN_SUBDIR}/lib/views/package.json" ]]; then
+            echo "package.json not found in plugin views directory"
+            exit 1
+          fi
+          
+          # Check that we have the required environment variables
+          if [[ -z "${{ steps.env-setup.outputs.SSH_HOST }}" ]]; then
+            echo "SSH_HOST not configured for ${{ steps.env-setup.outputs.ENVIRONMENT }} environment"
+            exit 1
+          fi
+          
+          if [[ -z "${{ steps.env-setup.outputs.SSH_USER }}" ]]; then
+            echo "SSH_USER not configured for ${{ steps.env-setup.outputs.ENVIRONMENT }} environment"
+            exit 1
+          fi
+          
+          if [[ -z "${{ steps.env-setup.outputs.DEPLOY_PATH }}" ]]; then
+            echo "DEPLOY_PATH not configured for ${{ steps.env-setup.outputs.ENVIRONMENT }} environment"
+            exit 1
+          fi
+          
+          echo "All prerequisites validated"
+          echo "Environment: ${{ steps.env-setup.outputs.ENVIRONMENT }}"
+          echo "Target URL: ${{ steps.env-setup.outputs.SITE_URL }}"
+          echo "Theme Deploy Path: ${{ steps.env-setup.outputs.THEME_DEPLOY_PATH }}"
+          echo "Plugin Deploy Path: ${{ steps.env-setup.outputs.PLUGIN_DEPLOY_PATH }}"
+
+      - name: Install PHP dependencies
+        run: |
+          echo "Installing PHP dependencies..."
+          cd ./${PLUGIN_SUBDIR}/lib
+          composer install --no-dev --optimize-autoloader --no-interaction
+          echo "Composer install completed"
+
+      - name: Install Node.js dependencies and build
+        run: |
+          echo "Installing Node.js dependencies..."
+          cd ./${PLUGIN_SUBDIR}/lib/views
+          npm install
+          echo 'VITE_API_BASE_URL=/wp-json/api/v1' > .env
+          echo "NPM dependencies installed"
+          
+          echo "Building assets..."
+          npm run build
+          echo "Build completed"
+          
+          # Show build output
+          echo "Build artifacts:"
+          ls -la
+
+      - name: Set up SSH key and known hosts
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ steps.env-setup.outputs.SSH_KEY_SECRET == 'PRODUCTION_HOSTINGER_SSH_KEY' && secrets.PRODUCTION_HOSTINGER_SSH_KEY || secrets.HOSTINGER_SSH_KEY }}
+
+      - name: Add server to known hosts
+        run: |
+          echo "Adding server to known hosts..."
+          ssh-keyscan -p ${{ steps.env-setup.outputs.SSH_PORT }} \
+            ${{ steps.env-setup.outputs.SSH_HOST }} >> ~/.ssh/known_hosts 2>/dev/null || true
+
+      - name: Test SSH connection
+        run: |
+          echo "Testing SSH connection..."
+          ssh -o ConnectTimeout=10 \
+              -p ${{ steps.env-setup.outputs.SSH_PORT }} \
+              ${{ steps.env-setup.outputs.SSH_USER }}@${{ steps.env-setup.outputs.SSH_HOST }} \
+              "echo 'SSH connection successful' && whoami && pwd"
+
+      - name: Verify remote directory structure
+        run: |
+          echo "Verifying remote directory structure..."
+          ssh -p ${{ steps.env-setup.outputs.SSH_PORT }} \
+              ${{ steps.env-setup.outputs.SSH_USER }}@${{ steps.env-setup.outputs.SSH_HOST }} \
+              "mkdir -p '${{ steps.env-setup.outputs.THEME_DEPLOY_PATH }}' && \
+               mkdir -p '${{ steps.env-setup.outputs.PLUGIN_DEPLOY_PATH }}' && \
+               echo 'Theme directory: ${{ steps.env-setup.outputs.THEME_DEPLOY_PATH }}' && \
+               echo 'Plugin directory: ${{ steps.env-setup.outputs.PLUGIN_DEPLOY_PATH }}' && \
+               ls -la '$(dirname ${{ steps.env-setup.outputs.THEME_DEPLOY_PATH }})' && \
+               ls -la '$(dirname ${{ steps.env-setup.outputs.PLUGIN_DEPLOY_PATH }})'"
+
+      - name: Create backup of current theme and plugin
+        if: steps.env-setup.outputs.ENVIRONMENT == 'production' || inputs.force_deploy != true
+        run: |
+          echo "Creating backup of current theme and plugin..."
+          BACKUP_NAME="wp-backup-$(date +%Y%m%d-%H%M%S)"
+          
+          ssh -p ${{ steps.env-setup.outputs.SSH_PORT }} \
+              ${{ steps.env-setup.outputs.SSH_USER }}@${{ steps.env-setup.outputs.SSH_HOST }} \
+              "mkdir -p '${BACKUP_DIR}' && \
+               
+               # Backup theme if exists
+               if [[ -d '${{ steps.env-setup.outputs.THEME_DEPLOY_PATH }}' ]]; then
+                 cp -r '${{ steps.env-setup.outputs.THEME_DEPLOY_PATH }}' '${BACKUP_DIR}/${BACKUP_NAME}-theme' && \
+                 echo 'Theme backup created: ${BACKUP_DIR}/${BACKUP_NAME}-theme'
+               else
+                 echo 'No existing theme to backup'
+               fi && \
+               
+               # Backup plugin if exists
+               if [[ -d '${{ steps.env-setup.outputs.PLUGIN_DEPLOY_PATH }}' ]]; then
+                 cp -r '${{ steps.env-setup.outputs.PLUGIN_DEPLOY_PATH }}' '${BACKUP_DIR}/${BACKUP_NAME}-plugin' && \
+                 echo 'Plugin backup created: ${BACKUP_DIR}/${BACKUP_NAME}-plugin'
+               else
+                 echo 'No existing plugin to backup'
+               fi"
+          
+          echo "BACKUP_NAME=${BACKUP_NAME}" >> $GITHUB_ENV
+
+      - name: Deploy theme via rsync
+        id: deploy-theme
+        run: |
+          echo "Starting theme deployment to ${{ steps.env-setup.outputs.ENVIRONMENT }}..."
+          
+          # Rsync with comprehensive options
+          rsync_cmd="rsync \
+            --archive \
+            --verbose \
+            --compress \
+            --delete \
+            --delete-excluded \
+            --human-readable \
+            --progress \
+            --timeout=${RSYNC_TIMEOUT} \
+            --exclude='.git*' \
+            --exclude='node_modules/' \
+            --exclude='*.log' \
+            --exclude='*.tmp' \
+            --exclude='.DS_Store' \
+            -e 'ssh -o StrictHostKeyChecking=no -o ConnectTimeout=30 -p ${{ steps.env-setup.outputs.SSH_PORT }}' \
+            ./${THEME_SUBDIR}/ \
+            ${{ steps.env-setup.outputs.SSH_USER }}@${{ steps.env-setup.outputs.SSH_HOST }}:'${{ steps.env-setup.outputs.THEME_DEPLOY_PATH }}/'"
+          
+          # Execute with retry logic
+          for attempt in $(seq 1 $MAX_RETRIES); do
+            echo "Theme deployment attempt $attempt of $MAX_RETRIES..."
+            
+            if eval "$rsync_cmd"; then
+              echo "Theme deployment successful on attempt $attempt"
+              echo "theme_deployment_success=true" >> $GITHUB_OUTPUT
+              break
+            else
+              echo "Theme deployment attempt $attempt failed"
+              if [[ $attempt -eq $MAX_RETRIES ]]; then
+                echo "All theme deployment attempts failed"
+                echo "theme_deployment_success=false" >> $GITHUB_OUTPUT
+                exit 1
+              fi
+              echo "Waiting 10 seconds before retry..."
+              sleep 10
+            fi
+          done
+
+      - name: Deploy plugin via rsync
+        id: deploy-plugin
+        run: |
+          echo "Starting plugin deployment to ${{ steps.env-setup.outputs.ENVIRONMENT }}..."
+          
+          # Rsync with comprehensive options
+          rsync_cmd="rsync \
+            --archive \
+            --verbose \
+            --compress \
+            --delete \
+            --delete-excluded \
+            --human-readable \
+            --progress \
+            --timeout=${RSYNC_TIMEOUT} \
+            --exclude='.git*' \
+            --exclude='node_modules/' \
+            --exclude='*.log' \
+            --exclude='*.tmp' \
+            --exclude='.DS_Store' \
+            --exclude='lib/views/src/' \
+            --exclude='lib/views/webpack*' \
+            -e 'ssh -o StrictHostKeyChecking=no -o ConnectTimeout=30 -p ${{ steps.env-setup.outputs.SSH_PORT }}' \
+            ./${PLUGIN_SUBDIR}/ \
+            ${{ steps.env-setup.outputs.SSH_USER }}@${{ steps.env-setup.outputs.SSH_HOST }}:'${{ steps.env-setup.outputs.PLUGIN_DEPLOY_PATH }}/'"
+          
+          # Execute with retry logic
+          for attempt in $(seq 1 $MAX_RETRIES); do
+            echo "Plugin deployment attempt $attempt of $MAX_RETRIES..."
+            
+            if eval "$rsync_cmd"; then
+              echo "Plugin deployment successful on attempt $attempt"
+              echo "plugin_deployment_success=true" >> $GITHUB_OUTPUT
+              break
+            else
+              echo "Plugin deployment attempt $attempt failed"
+              if [[ $attempt -eq $MAX_RETRIES ]]; then
+                echo "All plugin deployment attempts failed"
+                echo "plugin_deployment_success=false" >> $GITHUB_OUTPUT
+                exit 1
+              fi
+              echo "Waiting 10 seconds before retry..."
+              sleep 10
+            fi
+          done
+
+      - name: Set file permissions and ownership
+        if: steps.deploy-theme.outputs.theme_deployment_success == 'true' && steps.deploy-plugin.outputs.plugin_deployment_success == 'true'
+        run: |
+          echo "Setting proper file permissions and ownership..."
+          
+          ssh -p ${{ steps.env-setup.outputs.SSH_PORT }} \
+              ${{ steps.env-setup.outputs.SSH_USER }}@${{ steps.env-setup.outputs.SSH_HOST }} \
+              "# Set permissions for theme
+               cd '${{ steps.env-setup.outputs.THEME_DEPLOY_PATH }}' && \
+               find . -type f -exec chmod 644 {} \; && \
+               find . -type d -exec chmod 755 {} \; && \
+               echo 'Theme file permissions set (644 for files, 755 for directories)' && \
+               
+               # Set permissions for plugin
+               cd '${{ steps.env-setup.outputs.PLUGIN_DEPLOY_PATH }}' && \
+               find . -type f -exec chmod 644 {} \; && \
+               find . -type d -exec chmod 755 {} \; && \
+               echo 'Plugin file permissions set (644 for files, 755 for directories)'"
+          
+          # Set ownership (only if user has permission - using sudo is optional)
+          ssh -p ${{ steps.env-setup.outputs.SSH_PORT }} \
+              ${{ steps.env-setup.outputs.SSH_USER }}@${{ steps.env-setup.outputs.SSH_HOST }} \
+              "(sudo chown -R '${{ steps.env-setup.outputs.FILE_OWNER }}' '${{ steps.env-setup.outputs.THEME_DEPLOY_PATH }}' && \
+                sudo chown -R '${{ steps.env-setup.outputs.FILE_OWNER }}' '${{ steps.env-setup.outputs.PLUGIN_DEPLOY_PATH }}' && \
+                echo 'Ownership set to ${{ steps.env-setup.outputs.FILE_OWNER }}') || \
+               echo 'Could not change ownership (insufficient permissions)'"
+
+      - name: Verify deployment
+        if: steps.deploy-theme.outputs.theme_deployment_success == 'true' && steps.deploy-plugin.outputs.plugin_deployment_success == 'true'
+        run: |
+          echo "Verifying deployment..."
+          
+          ssh -p ${{ steps.env-setup.outputs.SSH_PORT }} \
+              ${{ steps.env-setup.outputs.SSH_USER }}@${{ steps.env-setup.outputs.SSH_HOST }} \
+              "echo '=== THEME VERIFICATION ===' && \
+               cd '${{ steps.env-setup.outputs.THEME_DEPLOY_PATH }}' && \
+               echo 'Theme files:' && \
+               find . -maxdepth 2 -type f | head -10 && \
+               echo 'Theme directory size:' && \
+               du -sh . && \
+               
+               echo '' && \
+               echo '=== PLUGIN VERIFICATION ===' && \
+               cd '${{ steps.env-setup.outputs.PLUGIN_DEPLOY_PATH }}' && \
+               echo 'Plugin files:' && \
+               find . -maxdepth 3 -type f | head -15 && \
+               echo 'Plugin directory size:' && \
+               du -sh . && \
+               
+               # Check if built assets exist
+               echo 'Built assets in lib/views:' && \
+               ls -la lib/views/ | grep -E '\.(js|css)$' || echo 'No built assets found' && \
+               
+               # Check vendor directory
+               echo 'Composer vendor directory:' && \
+               ls -la lib/vendor/ | head -5 || echo 'No vendor directory found'"
+
+      - name: WordPress cache cleanup (optional)
+        if: steps.deploy-theme.outputs.theme_deployment_success == 'true' && steps.deploy-plugin.outputs.plugin_deployment_success == 'true'
+        continue-on-error: true
+        run: |
+          echo "Attempting to clear WordPress cache..."
+          
+          ssh -p ${{ steps.env-setup.outputs.SSH_PORT }} \
+              ${{ steps.env-setup.outputs.SSH_USER }}@${{ steps.env-setup.outputs.SSH_HOST }} \
+              "cd '${{ steps.env-setup.outputs.DEPLOY_PATH }}' && \
+               if [[ -f 'wp-config.php' ]]; then
+                 # Clear common cache locations
+                 rm -rf wp-content/cache/* 2>/dev/null || true
+                 rm -rf wp-content/uploads/cache/* 2>/dev/null || true
+                 # Clear object cache if exists
+                 rm -f wp-content/object-cache.php 2>/dev/null || true
+                 echo 'Basic cache cleanup completed'
+               else
+                 echo 'wp-config.php not found, skipping cache cleanup'
+               fi"
+
+      # Rollback on failure
+      - name: Rollback on deployment failure
+        if: failure() && env.BACKUP_NAME != ''
+        run: |
+          echo "Rolling back to previous version..."
+          
+          ssh -p ${{ steps.env-setup.outputs.SSH_PORT }} \
+              ${{ steps.env-setup.outputs.SSH_USER }}@${{ steps.env-setup.outputs.SSH_HOST }} \
+              "# Rollback theme if backup exists
+               if [[ -d '${BACKUP_DIR}/${BACKUP_NAME}-theme' ]]; then
+                 rm -rf '${{ steps.env-setup.outputs.THEME_DEPLOY_PATH }}' && \
+                 mv '${BACKUP_DIR}/${BACKUP_NAME}-theme' '${{ steps.env-setup.outputs.THEME_DEPLOY_PATH }}' && \
+                 echo 'Theme rollback completed successfully'
+               else
+                 echo 'Theme backup not found, rollback failed'
+               fi && \
+               
+               # Rollback plugin if backup exists
+               if [[ -d '${BACKUP_DIR}/${BACKUP_NAME}-plugin' ]]; then
+                 rm -rf '${{ steps.env-setup.outputs.PLUGIN_DEPLOY_PATH }}' && \
+                 mv '${BACKUP_DIR}/${BACKUP_NAME}-plugin' '${{ steps.env-setup.outputs.PLUGIN_DEPLOY_PATH }}' && \
+                 echo 'Plugin rollback completed successfully'
+               else
+                 echo 'Plugin backup not found, rollback failed'
+               fi"
+
+      - name: Deployment Summary
+        if: always()
+        run: |
+          echo "## Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Attribute | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| **Environment** | ${{ steps.env-setup.outputs.ENVIRONMENT }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Target URL** | ${{ steps.env-setup.outputs.SITE_URL }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Branch** | ${{ github.ref_name }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Commit** | ${{ github.sha }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Author** | ${{ github.actor }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Theme Status** | ${{ steps.deploy-theme.outputs.theme_deployment_success == 'true' && '✅ Success' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Plugin Status** | ${{ steps.deploy-plugin.outputs.plugin_deployment_success == 'true' && '✅ Success' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Overall Status** | ${{ job.status }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [[ "${{ job.status }}" == "success" ]]; then
+            echo "**🎉 Deployment completed successfully!**" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### Deployed Components:" >> $GITHUB_STEP_SUMMARY
+            echo "- **Theme**: \`starter-theme-custom\`" >> $GITHUB_STEP_SUMMARY
+            echo "- **Plugin**: \`licenses-feature\` (with built assets)" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "**❌ Deployment failed. Check logs for details.**" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### Troubleshooting:" >> $GITHUB_STEP_SUMMARY
+            echo "1. Check the build logs for PHP/Node.js errors" >> $GITHUB_STEP_SUMMARY
+            echo "2. Verify SSH connection and permissions" >> $GITHUB_STEP_SUMMARY
+            echo "3. Check if backup was restored automatically" >> $GITHUB_STEP_SUMMARY
+          fi
